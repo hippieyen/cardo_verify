@@ -624,25 +624,27 @@ function showMsg(t, type='err'){
 
 /* ═══ 跳轉 ═════════════════════════════════════ */
 function goToDashboard(){ window.location.href = 'https://hippieyen.github.io/cardo_onboarding/' }
-function goToIndex(){ window.location.href = 'index.html' }
+function goToIndex(){ window.location.href = 'https://hippieyen.github.io/cardo_login/' }
 
 /* ═══ 主流程：偵測 token ══════════════════════ */
 ;(async () => {
-  const hash = window.location.hash
-  const params = new URLSearchParams(hash.replace('#',''))
-  const accessToken  = params.get('access_token')
-  const refreshToken = params.get('refresh_token')
-  const type         = params.get('type')    // 'signup' | 'recovery' | etc.
-  const errorDesc    = params.get('error_description')
+  // 偵測 URL 中的錯誤（hash 或 query string）
+  const hashParams  = new URLSearchParams(window.location.hash.replace('#',''))
+  const queryParams = new URLSearchParams(window.location.search)
+  const errorDesc   = hashParams.get('error_description') || queryParams.get('error_description')
 
-  // URL 帶有錯誤（Supabase 直接回傳 error）
   if(errorDesc){
     document.getElementById('errorSubtitle').textContent = decodeURIComponent(errorDesc)
     setState('error'); return
   }
 
-  // 無 token：純提示狀態（用戶從信箱點擊前）
-  if(!accessToken){
+  // 偵測是否有 token（舊版 hash flow 或新版 PKCE query flow）
+  const accessToken  = hashParams.get('access_token')
+  const refreshToken = hashParams.get('refresh_token')
+  const pkceCode     = queryParams.get('code')
+
+  // 無任何 token → 顯示等待驗證畫面
+  if(!accessToken && !pkceCode){
     document.getElementById('pendingTitle').textContent = '確認您的信箱'
     document.getElementById('pendingSubtitle').innerHTML =
       '驗證信已寄出，<br>請前往信箱點擊連結完成驗證。'
@@ -650,13 +652,40 @@ function goToIndex(){ window.location.href = 'index.html' }
     setState('waiting'); return
   }
 
-  // 有 token：嘗試設定 session
   setState('checking')
-  const { data, error } = await sb.auth.setSession({ access_token: accessToken, refresh_token: refreshToken || '' })
 
-  if(error || !data?.session){
+  let session = null
+  let authError = null
+
+  if(pkceCode){
+    // 新版 PKCE flow：讓 SDK 透過 onAuthStateChange 自動交換 code
+    try {
+      session = await new Promise((resolve, reject) => {
+        const { data: { subscription } } = sb.auth.onAuthStateChange((event, s) => {
+          if(event === 'SIGNED_IN' || event === 'USER_UPDATED'){
+            subscription.unsubscribe()
+            resolve(s)
+          }
+        })
+        // 最多等 10 秒
+        setTimeout(() => {
+          subscription.unsubscribe()
+          reject(new Error('驗證逾時，請重試。'))
+        }, 10000)
+      })
+    } catch(e) {
+      authError = e
+    }
+  } else {
+    // 舊版 implicit flow：直接 setSession
+    const { data, error } = await sb.auth.setSession({ access_token: accessToken, refresh_token: refreshToken || '' })
+    session = data?.session
+    authError = error
+  }
+
+  if(authError || !session){
     document.getElementById('errorSubtitle').innerHTML =
-      (error?.message || '驗證連結已失效，') + '<br>請重新申請驗證信。'
+      ((authError?.message) || '驗證連結已失效，') + '<br>請重新申請驗證信。'
     setState('error'); return
   }
 
